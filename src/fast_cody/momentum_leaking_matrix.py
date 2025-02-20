@@ -29,7 +29,7 @@ def momentum_leaking_matrix(V, T, dt=None, pow=1):
     D : (n, n) scipy sparse matrix
         Diagonal sparse matrix with entries varying from 0 (momentum-fully leaking) to 1 (momentum not leaking) for each vertex.
     """
-    F = igl.boundary_facets(T)
+    F = igl.boundary_facets(T)[0]
     M = igl.massmatrix(V, T)
     Me = sp.sparse.kron(sp.sparse.identity(3), M)
     bI = np.unique(F)

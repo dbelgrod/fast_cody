@@ -1,5 +1,5 @@
 numpy
-scipy
+scipy>=1.11.1
 cvxopt
 polyscope
 scikit-learn
