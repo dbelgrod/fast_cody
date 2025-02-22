@@ -3,4 +3,4 @@ scipy>=1.11.1
 cvxopt
 polyscope
 scikit-learn
-libigl
+libigl==2.4.1
