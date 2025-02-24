@@ -1,11 +1,16 @@
 import os
 import numpy as np
 import scipy as sp
+from scipy.sparse import hstack, vstack
+from scipy.sparse.linalg import LinearOperator
+from sklearn.cluster import KMeans
+
 import igl
 import json
 from os.path import basename, splitext
 import cvxopt
 import cvxopt.umfpack
+import time
 
 import fast_cody as fc
 
@@ -298,8 +303,269 @@ def contained_cd_affine_handle(msh_file=None, texture_png=None, texture_obj=None
     constraint_enforcement = "optimal"
     read_cache = False
     cache_dir = "./cache/"
-    [B, l, Ws] = fc.skinning_subspace(V, T, num_modes, num_clusters, C=C2, read_cache=read_cache,
-                                         cache_dir=cache_dir, constraint_enforcement=constraint_enforcement)
+    
+    def umfpack_lu_solve(A, b):
+        """
+        Solves Ax = b using LU factorization with umfpack.
+        Parameters
+        ----------
+        A : (n, n) float numpy array
+            Matrix to solve
+        b : (n, ) float numpy array
+            Right hand side
+
+        Returns
+        -------
+        x : (n, ) float numpy array
+            Solution to Ax = b
+        """
+        [I, J] = A.nonzero()
+        v = A.data
+        Ac= cvxopt.spmatrix(v, I, J, A.shape)
+        bc = cvxopt.matrix(b)
+        cvxopt.umfpack.linsolve(Ac, bc)
+        cnp = np.array(bc)
+        return cnp
+    
+    class umfpack_LU_LinearOperator(LinearOperator):
+        def __init__(self, A):
+            self.A = A
+            self.shape = A.shape
+            self.dtype = A.dtype
+            self.A = A
+
+            [I, J] = A.nonzero()
+            v = A.data
+            Ac = cvxopt.spmatrix(v, I, J, A.shape)
+            F = cvxopt.umfpack.symbolic(Ac)
+            self.numeric = cvxopt.umfpack.numeric(Ac, F)
+            self.A = Ac
+            # bc = cvxopt.matrix(b)
+            # cvxopt.umfpack.linsolve(Ac, bc)
+            # cnp = np.array(bc)
+            super(umfpack_LU_LinearOperator, self).__init__( A.dtype ,A.shape)
+
+        def _matvec(self, v):
+            b = cvxopt.matrix(v)
+            x = b
+            cvxopt.umfpack.solve(self.A, self.numeric, b)
+            return x
+
+    '''
+    Computes Generalized Eigenvalues and Eigenvectors of sparse non-definite matrix A, with massmatrix M
+
+    Inputs:
+    A - n x n indefinite sparse matrix
+
+    Optional
+    k - int number of eigenvectors/values tos olve for (default=5)
+    M - n x n indefinite mass matrix
+
+    Returns
+    D - k x 1 eigenvalues
+    B - n x k eigenvectors
+    '''
+    def eigs(A, k=5, M=None):
+        """
+        Computes Generalized Eigenvalues and Eigenvectors of sparse non-definite matrix A, with massmatrix M
+
+        Parameters
+        ----------
+        A : (n, n) float sparse matrix
+            Indefinite sparse matrix
+        k : int
+            Number of eigenvectors/values to solve for (default=5)
+        M : (n, n) float sparse matrix
+            Indefinite mass matrix
+
+        Returns
+        --------
+        D : (k, 1) float numpy array
+            Eigenvalues
+        B : (n, k) float numpy array
+            Eigenvectors
+
+        """
+        if M is None:
+            M = sp.sparse.identity(A.shape[0])
+
+        try:
+            OpInv = umfpack_LU_LinearOperator(A)
+            # MInv = umfpack_LU_LinearOperator(M)
+            [D, B] = sp.sparse.linalg.eigs(A, M=M, k=k, sigma=0,
+                                    which='LM', OPinv=OpInv)
+        except:
+            print("UMFPACK LU Factorization Failed, Trying Scipy LU, which is slower")
+            [D, B] = sp.sparse.linalg.eigs(A, M=M, k=k, sigma=0,which='LM')
+        return D, B
+    
+    def laplacian_eigenmodes(V, T, m, read_cache=False, cache_dir=None, J=None,
+                         mu=None, constraint_enforcement="optimal"):
+        """ Computes Laplacian Eigenmodes for a given mesh.
+
+        Parameters
+        ----------
+        V : (n, 3) float numpy array
+            Vertex positions
+        T : (F, 4) int numpy array
+            Tet indices
+        m : int
+            Number of modes to compute
+        read_cache : bool
+            Whether to read from cache or not (default False)
+        cache_dir : str
+            Directory to cache results in (default None)
+        J : (c x n) float numpy array
+            Constraint matrix we desire on our weights s.t. J @ W = 0 (default None)
+        mu : float
+            Per-tet conducivity. If None, sets it to 1.0 everyewhere (default None)
+        constraint_enforcement : str
+            Method of enforcing constraint. Either "project" or "optimal" (default "optimal")
+
+        Returns
+        -------
+        B : (n, m) float numpy array
+            Subspace matrix/Eigenvectors of laplacian.
+        E : (m, 1) float numpy array
+            Eigenvalues of each eigenvector
+        """
+      
+        L = laplacian(V, T, mu=mu)
+        M = igl.massmatrix(V, T)
+        L =  L + 1e-8 * M
+        if constraint_enforcement == "optimal":
+            if J is not None:
+                c = J.shape[0]
+                Z = sp.sparse.csc_matrix((c, c))
+                L = vstack((hstack((L, J.T)), hstack((J, Z )))).tocsc()
+                M = sp.sparse.block_diag((M, Z)).tocsc()
+        print("Computing eigenmodes... may take a while...")
+        start = time.time()
+        [E, B] = eigs(L, M=M, k=m)
+        print("Done computing eigenmodes! Took, ", time.time() - start, " seconds")
+
+        n = V.shape[0]
+        if J is not None:
+            B = B[:n, :]
+
+        B = np.real(B)
+        E = np.real(E)
+
+        # if constraint_enforcement == "project":
+        #     B = project_out_subspace(B, J.T)
+        #     E = np.diag(B.T @ L @ B)
+        #     print("Done projecting out constraints from eigenmodes")
+
+
+        B = orthonormalize(B)
+
+        return B, E
+    
+    def average_onto_simplex(A, T):
+        """ Average quantity from vertices to simplices
+        Parameters
+        ----------
+        A : (n, d) numpy float array
+            Per vertex d-dimensional quantities
+        T : (t, s) numpy int array
+            Simplex indices
+
+        Returns
+        -------
+        At : (t, d) numpy float array
+            Per simplex d-dimensional quantities
+        """
+        At = np.zeros((T.shape[0], A.shape[1]))
+        for td in range(T.shape[1]):
+            At += (A[T[:, td], :])/T.shape[1]
+
+        return At
+        
+    def skinning_clusters(W, D, T, k, l=2, num_clustering_features=10,
+                      return_centroids=False, return_simplex_features=False):
+        """ Skinning clusters.
+
+        Parameters
+        ----------
+        W : numpy float array
+            n x b skinning weights
+        D : numpy float array
+            b x 1 eigenvalue/weighing given to each skinning weight
+        T : numpy int array
+            T x 4 tet geometry
+        k : int
+            number of clusters
+        l : int
+            power to raise D to
+        num_clustering_features : int
+            number of features to use for clustering
+        return_centroids : bool
+            whether to return the centroids of the clusters
+        return_simplex_features : bool
+            whether to return the features averaged over each tet
+        """
+        num_clustering_features = min(num_clustering_features, W.shape[1])
+        # need to average the skinning weights over each tet
+        assert(T.shape[1] == 4, "only tets implemented so far for clustering")
+
+        Wt = average_onto_simplex(W, T)
+        # Wt2 = Wt / np.power(D, 2)
+        Wt = Wt / np.power(D, l)
+        Wt = Wt[:, 0:num_clustering_features]
+        kmeans = KMeans(n_clusters=k, random_state=0).fit(Wt)
+        l = kmeans.labels_
+
+        if return_simplex_features:
+            return l, Wt
+        if return_centroids == True:
+            return l, kmeans.cluster_centers_
+        else:
+            return l
+    
+    def skinning_subspace(X, T, num_modes, num_clusters,
+                        ortho=True, mu=None, C=None, constraint_enforcement="optimal"):
+        """
+        Constructs a physics subspace corresponding with skinning eigenmodes and skinning clusters
+
+        Parameters
+        ----------
+        X : (n, 3) float numpy array
+            Vertex positions
+        T : (t, 4) int numpy array
+            Tet indices
+        num_modes : int
+            Number of modes to use
+        num_clusters : int
+            Number of clusters to use
+        ortho : bool
+            Whether to orthonormalize the subspace
+        mu : float numpy array
+            Per-tet conducivity. If None, sets it to 1.0 everyewhere
+        C : (3n, c) float numpy array
+            Constraint matrix we desire on our weights s.t. C.T @ W = 0
+        constraint_enforcement : str
+            Method of enforcing constraint. Either "project" or "optimal"
+
+        Returns
+        -------
+        B : (3n, m) float numpy array
+            Subspace matrix/Eigenvectors of laplacian.
+        l : (t, 1) int numpy array
+            Cluster indices
+        W : (n, m) float numpy array
+            Skinning weights
+
+
+        """
+        dim = X.shape[1]
+        [W, E] = laplacian_eigenmodes(X, T, num_modes, read_cache=False, mu=mu, J=C, constraint_enforcement=constraint_enforcement)
+        B = lbs_jacobian(X, W)
+        M = sp.sparse.kron(sp.sparse.identity(3), igl.massmatrix(X, T))
+        l = skinning_clusters(W, E, T, num_clusters, l=2, num_clustering_features=num_modes)
+
+        return B, l, W
+    
+    [B, l, Ws] = skinning_subspace(V, T, num_modes, num_clusters, C=C2, constraint_enforcement=constraint_enforcement)
     
     #TODO: Fast CD Sim
     mu = 1e4
