@@ -68,8 +68,43 @@ def contained_cd_affine_handle(msh_file=None, texture_png=None, texture_obj=None
     J = lbs_jacobian(V_mod, Wp)
     
     #TODO: Complementary Constraint Matrix
-    C = fc.complementary_constraint_matrix(V_mod, T, J, dt=1e-3)
+
+    def momentum_leaking_matrix(V, T, dt=1e-3):
+        # Compute cotangent Laplacian and mass matrices
+        C = -igl.cotmatrix(V, T)
+        M = igl.massmatrix(V, T, igl.MASSMATRIX_TYPE_BARYCENTRIC)
+
+        # Initialize boundary conditions
+        Z0 = np.zeros(V.shape[0])
+        bF = igl.boundary_facets(T)
+        bI = np.unique(bF)
+        Z0[bI] = 1.0
+
+        # Solve diffusion equation
+        solver = sp.sparse.linalg.splu((C + dt * M).tocsc())
+        Z = solver.solve(M @ Z0)
+
+        # Normalize between 0 and 1
+        Z = Z - np.min(Z)
+        Z = Z / np.max(Z)
+
+        # Invert for diffusion method
+        Z = 1 - Z
+
+        # Create diagonal matrix
+        D = sp.sparse.diags(Z)
+
+        return D
     
+    def complementary_constraint_matrix(V, T, J, dt=1e-3):
+        M = igl.massmatrix(V, T)
+        Me = sp.sparse.kron(sp.sparse.identity(3), M)
+        D = momentum_leaking_matrix(V, T, dt=dt)
+        C =  (Me @ D @ J).T
+        return C
+    
+    C = complementary_constraint_matrix(V_mod, T, J, dt=1e-3)
+
     #TODO: LBS Weight Space Constraint
     C2 = fc.lbs_weight_space_constraint(V_mod, C)
     
