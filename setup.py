@@ -120,11 +120,11 @@ def main():
             'packaging',
             'mediapipe',
             'numpy',
-            'scipy',
+            'scipy>=1.11.1',
             'opencv-python',
             'cvxopt',
             'polyscope',
-            'libigl',
+            'libigl==2.4.1',
             'scikit-learn'
         ],
         ext_modules=[CMakeExtension('.', exclude_arch=exclude_arch)],
