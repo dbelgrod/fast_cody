@@ -116,7 +116,17 @@ def main():
         packages=setuptools.find_packages(where="src"),
         package_data={'fast_cody': ['shaders/*.glsl', 'data/*']},
         include_package_data=True,
-        install_requires=['packaging', 'numpy', 'scipy', 'mediapipe', 'opencv-python', 'cvxopt', 'polyscope', 'libigl', 'scikit-learn'],
+        install_requires=[
+            'packaging',
+            'mediapipe',
+            'numpy',
+            'scipy',
+            'opencv-python',
+            'cvxopt',
+            'polyscope',
+            'libigl',
+            'scikit-learn'
+        ],
         ext_modules=[CMakeExtension('.', exclude_arch=exclude_arch)],
         cmdclass=dict(build_ext=CMakeBuild),
         zip_safe=False,
